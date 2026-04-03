@@ -1,4 +1,4 @@
-name: PiPiClaw release
+name: PiPiClaw AOT Build
 
 on:
   push:
@@ -25,13 +25,15 @@ jobs:
           - { rid: win-x86,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false }
           - { rid: win-arm64, os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false }
 
-          # === Linux 阵营 ===
-          # x64: 使用 Debian 11 容器确保 glibc 2.31 兼容性
-          - { rid: linux-x64,   os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: true, use_container: true, container_image: "debian:bullseye" }
-          # arm64: 使用 Debian 11 + QEMU 模拟
-          - { rid: linux-arm64, os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: false, use_qemu: true, container_image: "debian:bullseye" }
-          # 32位 ARM：使用 ubuntu-22.04 原生 ARM runner
-          - { rid: linux-arm,   os: ubuntu-22.04-arm, ext: tar.gz, exe: PiPiClaw, use_upx: false }
+          # === Linux glibc 阵营 ===
+          - { rid: linux-x64,   os: ubuntu-latest,    ext: tar.gz, exe: PiPiClaw, use_upx: true }
+          - { rid: linux-arm64, os: ubuntu-24.04-arm, ext: tar.gz, exe: PiPiClaw, use_upx: false }
+          # 32位 ARM：锁定 ubuntu-22.04
+          - { rid: linux-arm,   os: ubuntu-22.04,     ext: tar.gz, exe: PiPiClaw, use_upx: false }
+
+          # === Linux musl 阵营 (不依赖 glibc) ===
+          - { rid: linux-musl-x64,   os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: true, is_musl: true }
+          - { rid: linux-musl-arm64, os: ubuntu-24.04-arm, ext: tar.gz, exe: PiPiClaw, use_upx: false, is_musl: true }
 
           # === macOS 阵营 ===
           - { rid: osx-x64,   os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false }
@@ -41,80 +43,65 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 为 ARM64 设置 QEMU 模拟
-      - name: Setup QEMU
-        if: matrix.use_qemu == true
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      # 使用容器运行步骤（Debian 11）
-      - name: Build in Debian 11 Container
-        if: matrix.use_container == true || matrix.use_qemu == true
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ${{ matrix.container_image }}
-          options: --platform linux/${{ matrix.rid == 'linux-arm64' && 'arm64' || 'amd64' }} -v ${{ github.workspace }}:/workspace -w /workspace
-          run: |
-            # 安装基础工具
-            apt-get update
-            apt-get install -y curl ca-certificates wget git
-            
-            # 安装编译依赖
-            apt-get install -y clang zlib1g-dev build-essential lld
-            
-            # 安装 p7zip（Debian 中的 7zip）
-            apt-get install -y p7zip-full
-            
-            # 安装 .NET SDK
-            wget https://packages.microsoft.com/config/debian/11/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-            dpkg -i packages-microsoft-prod.deb
-            rm packages-microsoft-prod.deb
-            apt-get update
-            apt-get install -y dotnet-sdk-10.0
-            
-            # 构建
-            dotnet publish -c Release \
-              -r ${{ matrix.rid }} \
-              -p:PublishAot=true \
-              -p:StripSymbols=true \
-              -p:DebugType=none \
-              -o ./publish_dir
-
-      # 原生宿主机构建（非容器化）
-      - name: Setup .NET (Native)
-        if: matrix.use_container != true && matrix.use_qemu != true
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Install Dependencies (Native Linux)
-        if: startsWith(matrix.rid, 'linux') && matrix.use_container != true && matrix.use_qemu != true
-        shell: bash
+      - name: Install Dependencies (Linux glibc & Cross-Compile)
+        if: startsWith(matrix.rid, 'linux') && matrix.is_musl != true
         run: |
           sudo apt-get update
+          # 新增 lld，解决默认 bfd 链接器跨平台水土不服导致 Exit Code 1 的问题
           sudo apt-get install -y clang zlib1g-dev build-essential 7zip lld
           
+          # 针对 linux-arm (32位) 配置交叉编译工具链和正确的底层镜像源
           if [ "${{ matrix.rid }}" == "linux-arm" ]; then
-            # 配置 32位 ARM 交叉编译
+            # 1. 更强大的正则修复：捕获所有不包含 [arch=...] 标签的 deb 行
             sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list
             sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
             
+            # 2. 写入 armhf 专属的 ports 源 (补全 updates 和 security 防依赖版本断层)
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
             
+            # 3. 启用架构并重新更新
             sudo dpkg --add-architecture armhf
             sudo apt-get update
             sudo apt-get install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
           fi
 
-      - name: Build AOT (Native)
-        if: matrix.use_container != true && matrix.use_qemu != true
+      - name: Install Dependencies (Linux musl)
+        if: matrix.is_musl == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y 7zip
+          
+          # 安装 musl 交叉编译工具链
+          if [ "${{ matrix.rid }}" == "linux-musl-x64" ]; then
+            sudo apt-get install -y musl-tools clang zlib1g-dev
+          elif [ "${{ matrix.rid }}" == "linux-musl-arm64" ]; then
+            # 添加 arm64 架构支持
+            sudo dpkg --add-architecture arm64
+            sudo sed -i 's/deb http/deb [arch=amd64,i386] http/g' /etc/apt/sources.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+            sudo apt-get update
+            sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu musl-tools clang
+            # 下载 musl aarch64 工具链
+            wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+            tar -xzf aarch64-linux-musl-cross.tgz
+            sudo cp -r aarch64-linux-musl-cross/* /usr/local/
+          fi
+
+      - name: Build AOT (glibc)
+        if: startsWith(matrix.rid, 'linux') && matrix.is_musl != true
         shell: bash
         run: |
           EXTRA_ARGS=""
           if [ "${{ matrix.rid }}" == "linux-arm" ]; then
+            # 退回 .NET 强依赖的 clang。注入专属 objcopy，并强制启用 lld 完美链接
             EXTRA_ARGS="-p:ObjCopyName=arm-linux-gnueabihf-objcopy -p:LinkerFlavor=lld"
           fi
           
@@ -126,16 +113,32 @@ jobs:
             $EXTRA_ARGS \
             -o ./publish_dir
 
-      # UPX 压缩（容器构建后的文件在宿主机上）
-      - name: UPX Compression (Container builds)
-        if: (matrix.use_container == true || matrix.use_qemu == true) && matrix.use_upx == true
+      - name: Build AOT (musl)
+        if: matrix.is_musl == true
         shell: bash
         run: |
-          sudo apt-get update && sudo apt-get install -y upx-ucl
-          upx --best --lzma ./publish_dir/${{ matrix.exe }}
+          EXTRA_ARGS=""
+          if [ "${{ matrix.rid }}" == "linux-musl-x64" ]; then
+            # x64 musl 使用 musl-gcc 作为链接器
+            export CC="musl-gcc"
+            EXTRA_ARGS="-p:StaticallyLinked=true"
+          elif [ "${{ matrix.rid }}" == "linux-musl-arm64" ]; then
+            # arm64 musl 交叉编译
+            export CC="aarch64-linux-musl-gcc"
+            export PATH="/usr/local/bin:$PATH"
+            EXTRA_ARGS="-p:StaticallyLinked=true -p:ObjCopyName=aarch64-linux-musl-objcopy"
+          fi
+          
+          dotnet publish -c Release \
+            -r ${{ matrix.rid }} \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            $EXTRA_ARGS \
+            -o ./publish_dir
 
-      - name: UPX Compression (Native builds)
-        if: matrix.use_upx == true && matrix.use_container != true && matrix.use_qemu != true
+      - name: UPX Compression
+        if: matrix.use_upx == true
         uses: svenstaro/upx-action@v2
         with:
           files: ./publish_dir/${{ matrix.exe }}
@@ -153,15 +156,10 @@ jobs:
             chmod +x ${{ matrix.exe }}
           fi
 
-          # 容器构建使用 p7zip，宿主机构建使用 7zip
-          if command -v 7z &> /dev/null; then
+          if [ "${{ matrix.ext }}" == "zip" ]; then
             7z a -tzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.zip *
           else
-            7z a -tzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.zip * 2>/dev/null || zip -r ../PiPiClaw_${{ matrix.rid }}.zip *
-          fi
-
-          if [ "${{ matrix.ext }}" == "tar.gz" ]; then
-            tar cf - * | gzip -9 > ../PiPiClaw_${{ matrix.rid }}.tar.gz
+            tar cf - * | 7z a -si -tgzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.tar.gz
           fi
 
       - name: Upload to Release
