@@ -75,14 +75,12 @@ jobs:
       - name: Install Dependencies (Linux musl x64)
         if: matrix.rid == 'linux-musl-x64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
+          sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip || true
+          sudo apt-get update; sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip || true
           
           # 下载并安装 musl aarch64 交叉编译工具链到 /usr/local
           cd /tmp
