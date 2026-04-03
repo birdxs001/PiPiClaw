@@ -70,13 +70,20 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
+      # ==================== 方案一：使用 musl.cc 工具链（Gitee 镜像） ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
           sudo apt-get update
-          # 使用 Ubuntu 官方源中的 musl 交叉编译器
-          sudo apt-get install -y clang zlib1g-dev build-essential 7zip \
-            gcc-aarch64-linux-musl g++-aarch64-linux-musl
+          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
+          
+          cd /tmp
+          # 使用 Gitee 镜像加速下载（替代 musl.cc）
+          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 https://gitee.com/mirrors/musl-cross-make/releases/download/latest/aarch64-linux-musl-cross.tgz
+          tar -xzf aarch64-linux-musl-cross.tgz
+          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
+          
+          ls -la /usr/local/bin/aarch64-linux-musl-*
           aarch64-linux-musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
@@ -119,6 +126,7 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
+      # ==================== 方案一构建步骤 ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
