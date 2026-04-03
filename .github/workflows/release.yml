@@ -1,4 +1,4 @@
-name: PiPiClaw AOT Build
+name: PiPiClaw release
 
 on:
   workflow_dispatch:
