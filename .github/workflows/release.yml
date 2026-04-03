@@ -70,7 +70,7 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 方案一：使用 musl.cc 工具链（Gitee 镜像） ====================
+      # ==================== 方案一修复：使用 multiarch 预构建工具链 ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
@@ -78,8 +78,9 @@ jobs:
           sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
           
           cd /tmp
-          # 使用 Gitee 镜像加速下载（替代 musl.cc）
-          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 https://gitee.com/mirrors/musl-cross-make/releases/download/latest/aarch64-linux-musl-cross.tgz
+          # 使用 GitHub 上 multiarch 发布的稳定工具链（替代失效的 Gitee 链接）
+          TOOLCHAIN_URL="https://github.com/multiarch/cross-toolchain/releases/download/v1.0/aarch64-linux-musl-cross.tgz"
+          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 "$TOOLCHAIN_URL"
           tar -xzf aarch64-linux-musl-cross.tgz
           sudo cp -r aarch64-linux-musl-cross/* /usr/local/
           
