@@ -77,15 +77,15 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 修复后的 linux-musl-arm64 依赖安装 ====================
+      # ==================== 修复后的 linux-musl-arm64 依赖安装（方案一） ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
           sudo apt-get update
-          # 使用 Ubuntu 官方源中的 musl 交叉编译工具链，不再依赖外部下载
-          sudo apt-get install -y clang zlib1g-dev build-essential 7zip gcc-aarch64-linux-musl
-          # 验证安装
-          aarch64-linux-musl-gcc --version
+          # 使用 Ubuntu 官方源中的交叉编译工具链和 musl 支持
+          sudo apt-get install -y clang zlib1g-dev build-essential 7zip \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            musl-tools libc6-dev-arm64-cross
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -129,30 +129,18 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
-      # ==================== linux-musl-arm64 构建步骤（无需修改） ====================
+      # ==================== linux-musl-arm64 构建步骤（简化，让 .NET SDK 自动处理） ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
         run: |
-          # 设置 musl 交叉编译工具链环境变量
-          export PATH="/usr/local/bin:$PATH"
-          export CC="aarch64-linux-musl-gcc"
-          export CXX="aarch64-linux-musl-g++"
-          export AR="aarch64-linux-musl-ar"
-          export OBJCOPY="aarch64-linux-musl-objcopy"
-          # 使用系统默认的 sysroot（musl 工具链已配置好）
-          
-          # 验证工具链可用
-          which aarch64-linux-musl-gcc
-          aarch64-linux-musl-gcc --version
-          
+          # 不需要手动设置 CC/CXX 等环境变量，.NET SDK 会自动识别交叉编译工具链
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
             -p:PublishAot=true \
             -p:StripSymbols=true \
             -p:DebugType=none \
             -p:StaticallyLinked=true \
-            -p:ObjCopyName=aarch64-linux-musl-objcopy \
             -o ./publish_dir
 
       - name: UPX Compression
