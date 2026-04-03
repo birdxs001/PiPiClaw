@@ -1,0 +1,130 @@
+name: PiPiClaw AOT Build
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (required for manual runs, for example v0.1.0 or v0.1.0-alpha.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # === Windows 阵营 ===
+          - { rid: win-x64,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: true, container: null }
+          - { rid: win-x86,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false, container: null }
+          - { rid: win-arm64, os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false, container: null }
+
+          # === Linux 阵营 ===
+          # 使用 Debian 11 (bullseye) 容器编译，确保 glibc 2.31 兼容性
+          - { rid: linux-x64,   os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: true, container: "debian:bullseye" }
+          - { rid: linux-arm64, os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: false, container: "arm64v8/debian:bullseye" }
+          # 32位 ARM：锁定 ubuntu-22.04
+          - { rid: linux-arm,   os: ubuntu-22.04, ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
+
+          # === macOS 阵营 ===
+          - { rid: osx-x64,   os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
+          - { rid: osx-arm64, os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU (for ARM64 cross-compilation)
+        if: matrix.rid == 'linux-arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Dependencies (Linux General & Cross-Compile)
+        if: startsWith(matrix.rid, 'linux')
+        shell: bash
+        run: |
+          apt-get update || sudo apt-get update
+          
+          # Debian 11 容器内使用 apt-get，宿主机使用 sudo
+          APT_CMD="apt-get"
+          if ! command -v sudo &> /dev/null && command -v sudo &> /dev/null; then
+            APT_CMD="sudo apt-get"
+          fi
+          
+          $APT_CMD install -y clang zlib1g-dev build-essential 7zip lld curl ca-certificates
+          
+          # 针对 linux-arm (32位) 配置交叉编译工具链
+          if [ "${{ matrix.rid }}" == "linux-arm" ]; then
+            $APT_CMD install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
+          fi
+
+      - name: Build AOT
+        shell: bash
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ matrix.rid }}" == "linux-arm" ]; then
+            EXTRA_ARGS="-p:ObjCopyName=arm-linux-gnueabihf-objcopy -p:LinkerFlavor=lld"
+          fi
+          
+          # 对于容器内编译，确保使用容器内的工具链
+          dotnet publish -c Release \
+            -r ${{ matrix.rid }} \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            $EXTRA_ARGS \
+            -o ./publish_dir
+
+      - name: UPX Compression
+        if: matrix.use_upx == true && matrix.container == null
+        uses: svenstaro/upx-action@v2
+        with:
+          files: ./publish_dir/${{ matrix.exe }}
+          args: --best --lzma
+          strip: true
+
+      - name: UPX Compression (Container)
+        if: matrix.use_upx == true && matrix.container != null
+        shell: bash
+        run: |
+          apt-get install -y upx-ucl || sudo apt-get install -y upx-ucl
+          upx --best --lzma ./publish_dir/${{ matrix.exe }}
+
+      - name: Cleanup and Packaging
+        shell: bash
+        run: |
+          cd ./publish_dir
+          
+          rm -rf *.pdb *.dbg *.dsym
+          
+          if [[ "${{ matrix.os }}" != "windows-latest" ]]; then
+            chmod +x ${{ matrix.exe }}
+          fi
+
+          if [ "${{ matrix.ext }}" == "zip" ]; then
+            7z a -tzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.zip *
+          else
+            tar cf - * | 7z a -si -tgzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.tar.gz
+          fi
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "PiPiClaw Latest Build"
+          files: PiPiClaw_${{ matrix.rid }}.${{ matrix.ext }}
+          make_latest: true
+          prerelease: false
+          append_body: true
+          overwrite: true
