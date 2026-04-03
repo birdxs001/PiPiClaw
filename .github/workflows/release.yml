@@ -52,21 +52,14 @@ jobs:
         if: startsWith(matrix.rid, 'linux') && matrix.is_musl != true
         run: |
           sudo apt-get update
-          # 新增 lld，解决默认 bfd 链接器跨平台水土不服导致 Exit Code 1 的问题
           sudo apt-get install -y clang zlib1g-dev build-essential 7zip lld
           
-          # 针对 linux-arm (32位) 配置交叉编译工具链和正确的底层镜像源
           if [ "${{ matrix.rid }}" == "linux-arm" ]; then
-            # 1. 更强大的正则修复：捕获所有不包含 [arch=...] 标签的 deb 行
             sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list
             sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
-            
-            # 2. 写入 armhf 专属的 ports 源 (补全 updates 和 security 防依赖版本断层)
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
             echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-            
-            # 3. 启用架构并重新更新
             sudo dpkg --add-architecture armhf
             sudo apt-get update
             sudo apt-get install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
@@ -77,15 +70,14 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 修复后的 linux-musl-arm64 依赖安装（方案一） ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
           sudo apt-get update
-          # 使用 Ubuntu 官方源中的交叉编译工具链和 musl 支持
+          # 使用 Ubuntu 官方源中的 musl 交叉编译器
           sudo apt-get install -y clang zlib1g-dev build-essential 7zip \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            musl-tools libc6-dev-arm64-cross
+            gcc-aarch64-linux-musl g++-aarch64-linux-musl
+          aarch64-linux-musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -104,10 +96,8 @@ jobs:
         run: |
           EXTRA_ARGS=""
           if [ "${{ matrix.rid }}" == "linux-arm" ]; then
-            # 退回 .NET 强依赖的 clang。注入专属 objcopy，并强制启用 lld 完美链接
             EXTRA_ARGS="-p:ObjCopyName=arm-linux-gnueabihf-objcopy -p:LinkerFlavor=lld"
           fi
-          
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
             -p:PublishAot=true \
@@ -129,18 +119,26 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
-      # ==================== linux-musl-arm64 构建步骤（简化，让 .NET SDK 自动处理） ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
         run: |
-          # 不需要手动设置 CC/CXX 等环境变量，.NET SDK 会自动识别交叉编译工具链
+          export CC="aarch64-linux-musl-gcc"
+          export CXX="aarch64-linux-musl-g++"
+          export AR="aarch64-linux-musl-ar"
+          export OBJCOPY="aarch64-linux-musl-objcopy"
+          
+          which aarch64-linux-musl-gcc
+          aarch64-linux-musl-gcc --version
+          
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
             -p:PublishAot=true \
             -p:StripSymbols=true \
             -p:DebugType=none \
             -p:StaticallyLinked=true \
+            -p:IlcLinkStatic=true \
+            -p:ObjCopyName=aarch64-linux-musl-objcopy \
             -o ./publish_dir
 
       - name: UPX Compression
@@ -155,13 +153,10 @@ jobs:
         shell: bash
         run: |
           cd ./publish_dir
-          
           rm -rf *.pdb *.dbg *.dsym
-          
           if [[ "${{ matrix.os }}" != "windows-latest" ]]; then
             chmod +x ${{ matrix.exe }}
           fi
-
           if [ "${{ matrix.ext }}" == "zip" ]; then
             7z a -tzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.zip *
           else
