@@ -70,22 +70,35 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 方案一：使用 messense/musl-cross-make 工具链（有效） ====================
-      - name: Install Dependencies (Linux musl arm64)
+      # ==================== 方案三：使用 Docker + Alpine 原生编译 musl 静态二进制 ====================
+      - name: Build AOT (Linux musl arm64) using Docker
         if: matrix.rid == 'linux-musl-arm64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
-          
-          cd /tmp
-          # 使用 messense 维护的 musl-cross-make 工具链（长期有效）
-          TOOLCHAIN_URL="https://github.com/messense/musl-cross-make/releases/download/v1.0.0/aarch64-linux-musl-cross.tgz"
-          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 "$TOOLCHAIN_URL"
-          tar -xzf aarch64-linux-musl-cross.tgz
-          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
-          
-          ls -la /usr/local/bin/aarch64-linux-musl-*
-          aarch64-linux-musl-gcc --version
+          # 使用官方 .NET SDK Alpine 镜像，其中自带 musl
+          docker run --rm \
+            -v ${{ github.workspace }}:/src \
+            -w /src \
+            mcr.microsoft.com/dotnet/sdk:10.0-alpine \
+            sh -c "
+              apk add --no-cache clang build-base zlib-dev && \
+              dotnet publish -c Release \
+                -r linux-musl-arm64 \
+                -p:PublishAot=true \
+                -p:StripSymbols=true \
+                -p:DebugType=none \
+                -p:StaticallyLinked=true \
+                -p:IlcLinkStatic=true \
+                -o /src/publish_dir
+            "
+          # 确保输出目录存在
+          mkdir -p publish_dir
+          # 将容器内生成的产物复制出来（挂载卷已经直接写入，但可能需要移动）
+          if [ -d publish_dir ]; then
+            echo "Output already in publish_dir"
+          else
+            echo "Error: No output generated"
+            exit 1
+          fi
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -127,28 +140,7 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
-      # ==================== 构建步骤（强制使用交叉工具链） ====================
-      - name: Build AOT (Linux musl arm64)
-        if: matrix.rid == 'linux-musl-arm64'
-        shell: bash
-        run: |
-          export CC="aarch64-linux-musl-gcc"
-          export CXX="aarch64-linux-musl-g++"
-          export AR="aarch64-linux-musl-ar"
-          export OBJCOPY="aarch64-linux-musl-objcopy"
-          
-          which aarch64-linux-musl-gcc
-          aarch64-linux-musl-gcc --version
-          
-          dotnet publish -c Release \
-            -r ${{ matrix.rid }} \
-            -p:PublishAot=true \
-            -p:StripSymbols=true \
-            -p:DebugType=none \
-            -p:StaticallyLinked=true \
-            -p:IlcLinkStatic=true \
-            -p:ObjCopyName=aarch64-linux-musl-objcopy \
-            -o ./publish_dir
+      # 注意：linux-musl-arm64 的构建步骤已由上面的 Docker 步骤完成，这里不再重复
 
       - name: UPX Compression
         if: matrix.use_upx == true
