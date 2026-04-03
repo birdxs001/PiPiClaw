@@ -77,19 +77,22 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
+      # ==================== 修复后的 linux-musl-arm64 依赖安装 ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
-          sudo apt-get update; sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip || true
+          sudo apt-get update
+          # 移除 || true，让 apt 失败时正确报错
+          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
           
-          # 下载并安装 musl aarch64 交叉编译工具链到 /usr/local
           cd /tmp
-          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+          # 增加重试、超时和详细输出，便于调试
+          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 https://musl.cc/aarch64-linux-musl-cross.tgz
           tar -xzf aarch64-linux-musl-cross.tgz
           sudo cp -r aarch64-linux-musl-cross/* /usr/local/
           # 验证安装
           ls -la /usr/local/bin/aarch64-linux-musl-*
-          /usr/local/bin/aarch64-linux-musl-gcc --version || true
+          /usr/local/bin/aarch64-linux-musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -133,6 +136,7 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
+      # ==================== 修复后的 linux-musl-arm64 构建步骤 ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
@@ -148,7 +152,7 @@ jobs:
           
           # 验证工具链可用
           which aarch64-linux-musl-gcc
-          aarch64-linux-musl-gcc --version || true
+          aarch64-linux-musl-gcc --version
           
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
@@ -194,4 +198,3 @@ jobs:
           prerelease: false
           append_body: true
           overwrite: true
-
