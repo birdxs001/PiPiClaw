@@ -70,12 +70,22 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 方案二：原生 ARM64 编译（强制使用 musl-gcc） ====================
+      # ==================== 方案一：使用 messense/musl-cross-make 工具链（有效） ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang zlib1g-dev build-essential 7zip musl-tools
+          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
+          
+          cd /tmp
+          # 使用 messense 维护的 musl-cross-make 工具链（长期有效）
+          TOOLCHAIN_URL="https://github.com/messense/musl-cross-make/releases/download/v1.0.0/aarch64-linux-musl-cross.tgz"
+          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 "$TOOLCHAIN_URL"
+          tar -xzf aarch64-linux-musl-cross.tgz
+          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
+          
+          ls -la /usr/local/bin/aarch64-linux-musl-*
+          aarch64-linux-musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -117,15 +127,18 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
-      # ==================== 方案二构建步骤（显式设置 CC=musl-gcc） ====================
+      # ==================== 构建步骤（强制使用交叉工具链） ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
         run: |
-          # 强制使用 musl-gcc 而不是默认的 gcc
-          export CC="musl-gcc"
-          # 可选：设置 CXX 为 musl-g++（如果需要 C++ 代码）
-          export CXX="musl-g++"
+          export CC="aarch64-linux-musl-gcc"
+          export CXX="aarch64-linux-musl-g++"
+          export AR="aarch64-linux-musl-ar"
+          export OBJCOPY="aarch64-linux-musl-objcopy"
+          
+          which aarch64-linux-musl-gcc
+          aarch64-linux-musl-gcc --version
           
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
@@ -134,6 +147,7 @@ jobs:
             -p:DebugType=none \
             -p:StaticallyLinked=true \
             -p:IlcLinkStatic=true \
+            -p:ObjCopyName=aarch64-linux-musl-objcopy \
             -o ./publish_dir
 
       - name: UPX Compression
