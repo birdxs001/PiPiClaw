@@ -72,30 +72,38 @@ jobs:
             sudo apt-get install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
           fi
 
-      - name: Install Dependencies (Linux musl)
-        if: matrix.is_musl == true
+      - name: Install Dependencies (Linux musl x64)
+        if: matrix.rid == 'linux-musl-x64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y 7zip
-          
-          # 安装 musl 交叉编译工具链
-          if [ "${{ matrix.rid }}" == "linux-musl-x64" ]; then
-            sudo apt-get install -y musl-tools clang zlib1g-dev
-          elif [ "${{ matrix.rid }}" == "linux-musl-arm64" ]; then
-            # 添加 arm64 架构支持
-            sudo dpkg --add-architecture arm64
-            sudo sed -i 's/deb http/deb [arch=amd64,i386] http/g' /etc/apt/sources.list
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
-            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-            sudo apt-get update
-            sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu musl-tools clang
-            # 下载 musl aarch64 工具链
-            wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-            tar -xzf aarch64-linux-musl-cross.tgz
-            sudo cp -r aarch64-linux-musl-cross/* /usr/local/
-          fi
+          sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip
 
-      - name: Build AOT (glibc)
+      - name: Install Dependencies (Linux musl arm64)
+        if: matrix.rid == 'linux-musl-arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
+          
+          # 下载并安装 musl aarch64 交叉编译工具链到 /usr/local
+          cd /tmp
+          wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
+          tar -xzf aarch64-linux-musl-cross.tgz
+          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
+          # 验证安装
+          /usr/local/bin/aarch64-linux-musl-gcc --version
+
+      - name: Build AOT (Windows & macOS)
+        if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
+        shell: bash
+        run: |
+          dotnet publish -c Release \
+            -r ${{ matrix.rid }} \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            -o ./publish_dir
+
+      - name: Build AOT (Linux glibc)
         if: startsWith(matrix.rid, 'linux') && matrix.is_musl != true
         shell: bash
         run: |
@@ -113,28 +121,41 @@ jobs:
             $EXTRA_ARGS \
             -o ./publish_dir
 
-      - name: Build AOT (musl)
-        if: matrix.is_musl == true
+      - name: Build AOT (Linux musl x64)
+        if: matrix.rid == 'linux-musl-x64'
         shell: bash
         run: |
-          EXTRA_ARGS=""
-          if [ "${{ matrix.rid }}" == "linux-musl-x64" ]; then
-            # x64 musl 使用 musl-gcc 作为链接器
-            export CC="musl-gcc"
-            EXTRA_ARGS="-p:StaticallyLinked=true"
-          elif [ "${{ matrix.rid }}" == "linux-musl-arm64" ]; then
-            # arm64 musl 交叉编译
-            export CC="aarch64-linux-musl-gcc"
-            export PATH="/usr/local/bin:$PATH"
-            EXTRA_ARGS="-p:StaticallyLinked=true -p:ObjCopyName=aarch64-linux-musl-objcopy"
-          fi
+          export CC="musl-gcc"
+          dotnet publish -c Release \
+            -r ${{ matrix.rid }} \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            -p:StaticallyLinked=true \
+            -o ./publish_dir
+
+      - name: Build AOT (Linux musl arm64)
+        if: matrix.rid == 'linux-musl-arm64'
+        shell: bash
+        run: |
+          # 设置 musl 交叉编译工具链环境变量
+          export PATH="/usr/local/bin:$PATH"
+          export CC="aarch64-linux-musl-gcc"
+          export CXX="aarch64-linux-musl-g++"
+          export AR="aarch64-linux-musl-ar"
+          export OBJCOPY="aarch64-linux-musl-objcopy"
+          
+          # 验证工具链可用
+          which aarch64-linux-musl-gcc
+          aarch64-linux-musl-gcc --version
           
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
             -p:PublishAot=true \
             -p:StripSymbols=true \
             -p:DebugType=none \
-            $EXTRA_ARGS \
+            -p:StaticallyLinked=true \
+            -p:ObjCopyName=aarch64-linux-musl-objcopy \
             -o ./publish_dir
 
       - name: UPX Compression
@@ -172,3 +193,4 @@ jobs:
           prerelease: false
           append_body: true
           overwrite: true
+
