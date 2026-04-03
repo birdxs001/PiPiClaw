@@ -70,29 +70,20 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 使用 Docker + Alpine 编译 musl 静态二进制 ====================
-      - name: Build AOT (Linux musl arm64) using Docker
+      # ==================== linux-musl-arm64: 使用 musl-cross-make 工具链（完全静态） ====================
+      - name: Install musl-cross-make toolchain (arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
-          # 确保输出目录存在并可写
-          mkdir -p publish_dir
-          docker run --rm \
-            -v ${{ github.workspace }}:/src \
-            -w /src \
-            mcr.microsoft.com/dotnet/sdk:10.0-alpine \
-            sh -c "
-              apk add --no-cache clang build-base zlib-dev && \
-              dotnet publish -c Release \
-                -r linux-musl-arm64 \
-                -p:PublishAot=true \
-                -p:StripSymbols=true \
-                -p:DebugType=none \
-                -p:StaticallyLinked=true \
-                -p:IlcLinkStatic=true \
-                -o /src/publish_dir
-            "
-          # 修复文件所有权：将 publish_dir 下的文件改为当前用户所有
-          sudo chown -R $(id -u):$(id -g) publish_dir
+          sudo apt-get update
+          sudo apt-get install -y wget tar
+          cd /tmp
+          # 使用 messense 维护的最新工具链 (v1.2.0)
+          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 \
+            https://github.com/messense/musl-cross-make/releases/download/v1.2.0/aarch64-linux-musl-cross.tgz
+          tar -xzf aarch64-linux-musl-cross.tgz
+          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
+          # 验证
+          aarch64-linux-musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -134,6 +125,31 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
+      # ==================== linux-musl-arm64 构建（强制完全静态） ====================
+      - name: Build AOT (Linux musl arm64)
+        if: matrix.rid == 'linux-musl-arm64'
+        shell: bash
+        run: |
+          export CC="aarch64-linux-musl-gcc"
+          export CXX="aarch64-linux-musl-g++"
+          export AR="aarch64-linux-musl-ar"
+          export OBJCOPY="aarch64-linux-musl-objcopy"
+          
+          # 验证工具链
+          which aarch64-linux-musl-gcc
+          aarch64-linux-musl-gcc --version
+          
+          dotnet publish -c Release \
+            -r ${{ matrix.rid }} \
+            -p:PublishAot=true \
+            -p:StripSymbols=true \
+            -p:DebugType=none \
+            -p:StaticallyLinked=true \
+            -p:IlcLinkStatic=true \
+            -p:StaticLibc=true \
+            -p:ObjCopyName=aarch64-linux-musl-objcopy \
+            -o ./publish_dir
+
       - name: UPX Compression
         if: matrix.use_upx == true
         uses: svenstaro/upx-action@v2
@@ -142,15 +158,13 @@ jobs:
           args: --best --lzma
           strip: true
 
-      # ==================== 修复权限的打包步骤 ====================
       - name: Cleanup and Packaging
         shell: bash
         run: |
           cd ./publish_dir
           rm -rf *.pdb *.dbg *.dsym
           if [[ "${{ matrix.os }}" != "windows-latest" ]]; then
-            # 使用 sudo 提升权限（Docker 产生的文件可能属于 root）
-            sudo chmod +x ${{ matrix.exe }}
+            chmod +x ${{ matrix.exe }}
           fi
           if [ "${{ matrix.ext }}" == "zip" ]; then
             7z a -tzip -mx=9 ../PiPiClaw_${{ matrix.rid }}.zip *
