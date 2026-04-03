@@ -1,14 +1,9 @@
-name: PiPiClaw release
+name: PiPiClaw AOT Build
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (required for manual runs, for example v0.1.0 or v0.1.0-alpha.1)"
-        required: true
+  push:
+    branches: ["master"]
 
 permissions:
   contents: write
@@ -16,60 +11,92 @@ permissions:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # === Windows 阵营 ===
-          - { rid: win-x64,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: true, container: null }
-          - { rid: win-x86,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false, container: null }
-          - { rid: win-arm64, os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false, container: null }
+          - { rid: win-x64,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: true }
+          - { rid: win-x86,   os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false }
+          - { rid: win-arm64, os: windows-latest, ext: zip,    exe: PiPiClaw.exe, use_upx: false }
 
           # === Linux 阵营 ===
-          # 使用 Debian 11 (bullseye) 容器编译，确保 glibc 2.31 兼容性
-          - { rid: linux-x64,   os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: true, container: "debian:bullseye" }
-          - { rid: linux-arm64, os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: false, container: "arm64v8/debian:bullseye" }
-          # 32位 ARM：锁定 ubuntu-22.04
-          - { rid: linux-arm,   os: ubuntu-22.04, ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
+          # x64: 使用 Debian 11 容器确保 glibc 2.31 兼容性
+          - { rid: linux-x64,   os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: true, use_container: true, container_image: "debian:bullseye" }
+          # arm64: 使用 Debian 11 + QEMU 模拟
+          - { rid: linux-arm64, os: ubuntu-latest, ext: tar.gz, exe: PiPiClaw, use_upx: false, use_qemu: true, container_image: "debian:bullseye" }
+          # 32位 ARM：使用 ubuntu-22.04 原生 ARM runner
+          - { rid: linux-arm,   os: ubuntu-22.04-arm, ext: tar.gz, exe: PiPiClaw, use_upx: false }
 
           # === macOS 阵营 ===
-          - { rid: osx-x64,   os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
-          - { rid: osx-arm64, os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false, container: null }
+          - { rid: osx-x64,   os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false }
+          - { rid: osx-arm64, os: macos-latest,   ext: tar.gz, exe: PiPiClaw, use_upx: false }
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup QEMU (for ARM64 cross-compilation)
-        if: matrix.rid == 'linux-arm64'
+      # 为 ARM64 设置 QEMU 模拟
+      - name: Setup QEMU
+        if: matrix.use_qemu == true
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
-      - name: Setup .NET
+      # 使用容器运行步骤（Debian 11）
+      - name: Build in Debian 11 Container
+        if: matrix.use_container == true || matrix.use_qemu == true
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ matrix.container_image }}
+          options: --platform linux/${{ matrix.rid == 'linux-arm64' && 'arm64' || 'amd64' }} -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            # 在容器内执行构建
+            apt-get update
+            apt-get install -y curl ca-certificates clang zlib1g-dev build-essential 7zip lld
+            
+            # 安装 .NET
+            curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 10.0 --install-dir ~/.dotnet
+            export PATH="$HOME/.dotnet:$PATH"
+            
+            # 构建
+            dotnet publish -c Release \
+              -r ${{ matrix.rid }} \
+              -p:PublishAot=true \
+              -p:StripSymbols=true \
+              -p:DebugType=none \
+              -o ./publish_dir
+
+      # 原生宿主机构建（非容器化）
+      - name: Setup .NET (Native)
+        if: matrix.use_container != true && matrix.use_qemu != true
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Install Dependencies (Linux General & Cross-Compile)
-        if: startsWith(matrix.rid, 'linux')
+      - name: Install Dependencies (Native Linux)
+        if: startsWith(matrix.rid, 'linux') && matrix.use_container != true && matrix.use_qemu != true
         shell: bash
         run: |
-          apt-get update || sudo apt-get update
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev build-essential 7zip lld
           
-          # Debian 11 容器内使用 apt-get，宿主机使用 sudo
-          APT_CMD="apt-get"
-          if ! command -v sudo &> /dev/null && command -v sudo &> /dev/null; then
-            APT_CMD="sudo apt-get"
-          fi
-          
-          $APT_CMD install -y clang zlib1g-dev build-essential 7zip lld curl ca-certificates
-          
-          # 针对 linux-arm (32位) 配置交叉编译工具链
           if [ "${{ matrix.rid }}" == "linux-arm" ]; then
-            $APT_CMD install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
+            # 配置 32位 ARM 交叉编译
+            sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list
+            sudo sed -i -E 's/^deb[[:space:]]+([^\[])/deb [arch=amd64,i386] \1/g' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            
+            echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
+            echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+            echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+            
+            sudo dpkg --add-architecture armhf
+            sudo apt-get update
+            sudo apt-get install -y gcc-arm-linux-gnueabihf zlib1g-dev:armhf
           fi
 
-      - name: Build AOT
+      - name: Build AOT (Native)
+        if: matrix.use_container != true && matrix.use_qemu != true
         shell: bash
         run: |
           EXTRA_ARGS=""
@@ -77,7 +104,6 @@ jobs:
             EXTRA_ARGS="-p:ObjCopyName=arm-linux-gnueabihf-objcopy -p:LinkerFlavor=lld"
           fi
           
-          # 对于容器内编译，确保使用容器内的工具链
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
             -p:PublishAot=true \
@@ -86,20 +112,21 @@ jobs:
             $EXTRA_ARGS \
             -o ./publish_dir
 
-      - name: UPX Compression
-        if: matrix.use_upx == true && matrix.container == null
+      # UPX 压缩（容器构建后的文件在宿主机上）
+      - name: UPX Compression (Container builds)
+        if: (matrix.use_container == true || matrix.use_qemu == true) && matrix.use_upx == true
+        shell: bash
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx-ucl
+          upx --best --lzma ./publish_dir/${{ matrix.exe }}
+
+      - name: UPX Compression (Native builds)
+        if: matrix.use_upx == true && matrix.use_container != true && matrix.use_qemu != true
         uses: svenstaro/upx-action@v2
         with:
           files: ./publish_dir/${{ matrix.exe }}
           args: --best --lzma
           strip: true
-
-      - name: UPX Compression (Container)
-        if: matrix.use_upx == true && matrix.container != null
-        shell: bash
-        run: |
-          apt-get install -y upx-ucl || sudo apt-get install -y upx-ucl
-          upx --best --lzma ./publish_dir/${{ matrix.exe }}
 
       - name: Cleanup and Packaging
         shell: bash
@@ -128,3 +155,4 @@ jobs:
           prerelease: false
           append_body: true
           overwrite: true
+
