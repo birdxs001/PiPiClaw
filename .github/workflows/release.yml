@@ -70,23 +70,17 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== 方案一：使用 musl.cc 官方工具链 ====================
+      # ==================== linux-musl-arm64: 使用系统 musl-tools 并强制静态链接 ====================
       - name: Install Dependencies (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget tar clang zlib1g-dev build-essential 7zip
-          
-          cd /tmp
-          # 使用 musl.cc 官方提供的 aarch64 musl 交叉工具链
-          # 增加重试和超时参数以应对网络不稳定
-          wget --retry-connrefused --waitretry=1 --timeout=30 --tries=5 \
-            https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar -xzf aarch64-linux-musl-cross.tgz
-          sudo cp -r aarch64-linux-musl-cross/* /usr/local/
-          
-          # 验证安装
-          aarch64-linux-musl-gcc --version
+          sudo apt-get install -y clang zlib1g-dev build-essential 7zip musl-tools
+          # 创建 musl-gcc 的软链接（如果不存在）
+          if ! command -v musl-gcc &> /dev/null; then
+            sudo ln -s /usr/bin/musl-gcc /usr/local/bin/musl-gcc || true
+          fi
+          musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -128,19 +122,18 @@ jobs:
             -p:StaticallyLinked=true \
             -o ./publish_dir
 
-      # ==================== linux-musl-arm64 构建（完全静态链接） ====================
+      # ==================== linux-musl-arm64 构建（强制使用 musl-gcc 和完全静态链接） ====================
       - name: Build AOT (Linux musl arm64)
         if: matrix.rid == 'linux-musl-arm64'
         shell: bash
         run: |
-          export CC="aarch64-linux-musl-gcc"
-          export CXX="aarch64-linux-musl-g++"
-          export AR="aarch64-linux-musl-ar"
-          export OBJCOPY="aarch64-linux-musl-objcopy"
+          export CC="musl-gcc"
+          export CXX="musl-g++"
+          # 确保使用正确的链接器
+          export PATH="/usr/local/bin:$PATH"
           
-          # 验证工具链
-          which aarch64-linux-musl-gcc
-          aarch64-linux-musl-gcc --version
+          echo "Using musl-gcc: $(which musl-gcc)"
+          musl-gcc --version
           
           dotnet publish -c Release \
             -r ${{ matrix.rid }} \
@@ -150,8 +143,21 @@ jobs:
             -p:StaticallyLinked=true \
             -p:IlcLinkStatic=true \
             -p:StaticLibc=true \
-            -p:ObjCopyName=aarch64-linux-musl-objcopy \
+            -p:LinkerFlavor=lld \
+            -p:UseLLVM=true \
+            --self-contained true \
             -o ./publish_dir
+          
+          # 验证二进制是否为静态链接
+          echo "=== 验证二进制链接类型 ==="
+          file ./publish_dir/${{ matrix.exe }}
+          if ldd ./publish_dir/${{ matrix.exe }} 2>&1 | grep -q "not a dynamic executable"; then
+            echo "✅ 二进制是静态链接"
+          else
+            echo "❌ 错误：二进制是动态链接，需要检查编译参数"
+            ldd ./publish_dir/${{ matrix.exe }} || true
+            exit 1
+          fi
 
       - name: UPX Compression
         if: matrix.use_upx == true
