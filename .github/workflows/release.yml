@@ -70,17 +70,40 @@ jobs:
         run: |
           sudo apt-get update; sudo apt-get install -y musl-tools clang zlib1g-dev build-essential 7zip || true
 
-      # ==================== linux-musl-arm64: 使用系统 musl-tools 并强制静态链接 ====================
-      - name: Install Dependencies (Linux musl arm64)
+      # ==================== linux-musl-arm64: 使用 Docker Alpine 进行完全静态编译 ====================
+      - name: Build AOT (Linux musl arm64) using Docker Alpine
         if: matrix.rid == 'linux-musl-arm64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang zlib1g-dev build-essential 7zip musl-tools
-          # 创建 musl-gcc 的软链接（如果不存在）
-          if ! command -v musl-gcc &> /dev/null; then
-            sudo ln -s /usr/bin/musl-gcc /usr/local/bin/musl-gcc || true
+          mkdir -p publish_dir
+          docker run --rm \
+            -v ${{ github.workspace }}:/src \
+            -w /src \
+            mcr.microsoft.com/dotnet/sdk:10.0-alpine \
+            sh -c "
+              apk add --no-cache clang build-base zlib-dev && \
+              dotnet publish -c Release \
+                -r linux-musl-arm64 \
+                -p:PublishAot=true \
+                -p:StripSymbols=true \
+                -p:DebugType=none \
+                -p:StaticallyLinked=true \
+                -p:IlcLinkStatic=true \
+                -p:StaticLibc=true \
+                --self-contained true \
+                -o /src/publish_dir
+            "
+          # 修复文件所有权
+          sudo chown -R $(id -u):$(id -g) publish_dir
+          # 验证静态链接
+          echo "=== 验证二进制链接类型 ==="
+          file publish_dir/${{ matrix.exe }}
+          if ldd publish_dir/${{ matrix.exe }} 2>&1 | grep -q "not a dynamic executable"; then
+            echo "✅ 二进制是静态链接"
+          else
+            echo "❌ 错误：二进制是动态链接，编译失败"
+            ldd publish_dir/${{ matrix.exe }} || true
+            exit 1
           fi
-          musl-gcc --version
 
       - name: Build AOT (Windows & macOS)
         if: startsWith(matrix.rid, 'win') || startsWith(matrix.rid, 'osx')
@@ -121,43 +144,6 @@ jobs:
             -p:DebugType=none \
             -p:StaticallyLinked=true \
             -o ./publish_dir
-
-      # ==================== linux-musl-arm64 构建（强制使用 musl-gcc 和完全静态链接） ====================
-      - name: Build AOT (Linux musl arm64)
-        if: matrix.rid == 'linux-musl-arm64'
-        shell: bash
-        run: |
-          export CC="musl-gcc"
-          export CXX="musl-g++"
-          # 确保使用正确的链接器
-          export PATH="/usr/local/bin:$PATH"
-          
-          echo "Using musl-gcc: $(which musl-gcc)"
-          musl-gcc --version
-          
-          dotnet publish -c Release \
-            -r ${{ matrix.rid }} \
-            -p:PublishAot=true \
-            -p:StripSymbols=true \
-            -p:DebugType=none \
-            -p:StaticallyLinked=true \
-            -p:IlcLinkStatic=true \
-            -p:StaticLibc=true \
-            -p:LinkerFlavor=lld \
-            -p:UseLLVM=true \
-            --self-contained true \
-            -o ./publish_dir
-          
-          # 验证二进制是否为静态链接
-          echo "=== 验证二进制链接类型 ==="
-          file ./publish_dir/${{ matrix.exe }}
-          if ldd ./publish_dir/${{ matrix.exe }} 2>&1 | grep -q "not a dynamic executable"; then
-            echo "✅ 二进制是静态链接"
-          else
-            echo "❌ 错误：二进制是动态链接，需要检查编译参数"
-            ldd ./publish_dir/${{ matrix.exe }} || true
-            exit 1
-          fi
 
       - name: UPX Compression
         if: matrix.use_upx == true
